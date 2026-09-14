@@ -1,10 +1,16 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { webContents } from "electron";
 import { dispatchIpcEvent } from "@/main/utils/dispatchIpcEvent";
 import { configManager } from "@/main/modules/configManager";
 
-const faceFilePaths = new Set<string>();
-const awaitIsFileExist = new Map<string, Function>();
+const faceFilePaths = new Map<string, string>();
+const awaitIsFileExist = new Map<
+  string,
+  {
+    cb: () => void;
+    dynamicFacePath: string;
+  }
+>();
 
 function convertMarketFaceToPic(msgList: any[], webContentId: number) {
   for (const msgItem of msgList) {
@@ -25,13 +31,13 @@ function replaceMarketFace(marketFaceElement: any): object {
   const fileName = marketFaceElement.staticFacePath.split("\\").pop();
   const picWidth = marketFaceElement.imageHeight ?? 200;
   const picHeight = marketFaceElement.imageHeight ?? 200;
-  const sourcePath = marketFaceElement.staticFacePath;
-  faceFilePaths.add(sourcePath);
+  const staticFacePath = marketFaceElement.staticFacePath;
   const thumbPath = new Map([
-    ["0", sourcePath],
-    ["198", sourcePath],
-    ["720", sourcePath],
+    ["0", staticFacePath],
+    ["198", staticFacePath],
+    ["720", staticFacePath],
   ]);
+
   return {
     picSubType: 1,
     fileName,
@@ -40,7 +46,7 @@ function replaceMarketFace(marketFaceElement: any): object {
     picHeight,
     original: true,
     md5HexStr: "",
-    sourcePath,
+    sourcePath: staticFacePath,
     thumbPath,
     transferStatus: 2,
     progress: 0,
@@ -79,63 +85,92 @@ function replaceMarketFace(marketFaceElement: any): object {
 }
 
 function downloadMarketFace(marketFaceElement: any, webContentId: number) {
-  if (!existsSync(marketFaceElement.staticFacePath)) {
-    dispatchIpcEvent(
-      webContentId,
-      {
-        type: "request",
-        eventName: "ntApi",
-      },
-      {
-        cmdName: "nodeIKernelMsgService/fetchMarketEmoticonAioImage",
-        cmdType: "invoke",
-        payload: [
-          {
-            marketEmoticonAioImageReq: {
-              eId: marketFaceElement.emojiId,
-              epId: marketFaceElement.emojiPackageId,
-              name: marketFaceElement.faceName,
-              width: marketFaceElement.imageHeight,
-              height: marketFaceElement.imageHeight,
-              jobType: 0,
-              encryptKey: marketFaceElement.key,
-              filePath: marketFaceElement.staticFacePath,
-              downloadType: 4,
-            },
-          },
-          undefined,
-        ],
-      },
-      true
-    );
+  const { staticFacePath, dynamicFacePath } = marketFaceElement;
+
+  if (existsSync(staticFacePath)) {
+    if (existsSync(dynamicFacePath)) {
+      decodeQqMarketface(marketFaceElement.dynamicFacePath, staticFacePath);
+    }
+    return;
   }
+
+  // Register before dispatching so an immediate completion event can be matched.
+  faceFilePaths.set(staticFacePath, marketFaceElement.dynamicFacePath);
+
+  dispatchIpcEvent(
+    webContentId,
+    {
+      type: "request",
+      eventName: "ntApi",
+    },
+    {
+      cmdName: "nodeIKernelMsgService/fetchMarketEmoticonAioImage",
+      cmdType: "invoke",
+      payload: [
+        {
+          marketEmoticonAioImageReq: {
+            eId: marketFaceElement.emojiId,
+            epId: marketFaceElement.emojiPackageId,
+            name: marketFaceElement.faceName,
+            width: marketFaceElement.imageHeight,
+            height: marketFaceElement.imageHeight,
+            jobType: 0,
+            encryptKey: marketFaceElement.key,
+            filePath: staticFacePath,
+            downloadType: 4,
+          },
+        },
+        undefined,
+      ],
+    },
+    true,
+  );
 }
 
 IpcInterceptor.interceptIpcSendEvents(
   "nodeIKernelMsgListener/onEmojiDownloadComplete",
-  (channel: string, event: any, args: any) => {
-    if (configManager.value.message.marketFaceToPicElement) {
-      const filePath = args?.payload?.notifyInfo?.path;
-      if (!filePath) return;
-      const cb = awaitIsFileExist.get(filePath);
-      if (cb) {
-        cb();
-        awaitIsFileExist.delete(filePath);
-      } else {
-        faceFilePaths.delete(filePath);
-      }
+  (_channel: string, _event: any, args: any) => {
+    if (!configManager.value.message.marketFaceToPicElement) {
+      return;
     }
-  }
+
+    const staticFacePath = args?.payload?.notifyInfo?.path;
+    if (!staticFacePath) return;
+
+    const item = awaitIsFileExist.get(staticFacePath);
+    const dynamicFacePath = item?.dynamicFacePath ?? faceFilePaths.get(staticFacePath);
+
+    // Ignore download events that were not registered by this module.
+    if (!dynamicFacePath) return;
+
+    try {
+      if (existsSync(staticFacePath) && existsSync(dynamicFacePath)) {
+        decodeQqMarketface(dynamicFacePath, staticFacePath);
+      }
+    } catch (error) {
+      // The downloaded static file remains usable as a fallback.
+      console.error("MarketFace decode failed", error);
+    } finally {
+      // Resume the renderer only after the decode attempt has completed.
+      item?.cb();
+      awaitIsFileExist.delete(staticFacePath);
+      faceFilePaths.delete(staticFacePath);
+    }
+  },
 );
 
-IpcInterceptor.interceptIpcReceiveEvents("isFileExist", (_: any, __: any, channel: string, args: any) => {
+IpcInterceptor.interceptIpcReceiveEvents("isFileExist", (_event: any, _sender: any, channel: string, args: any) => {
   if (configManager.value.message.marketFaceToPicElement) {
     const webContentId = parseInt(channel.split("RM_IPCFROM_RENDERER")[1]) || 2;
     const callbackId = args?.[0]?.callbackId;
     const filePath = args?.[1]?.payload?.[0];
+
     if (filePath && faceFilePaths.has(filePath)) {
+      awaitIsFileExist.set(filePath, {
+        cb: () => sendFileIsExist(webContentId, callbackId),
+        dynamicFacePath: faceFilePaths.get(filePath)!,
+      });
       faceFilePaths.delete(filePath);
-      awaitIsFileExist.set(filePath, () => sendFileIsExist(webContentId, callbackId));
       return { action: "block" };
     }
   }
@@ -143,6 +178,7 @@ IpcInterceptor.interceptIpcReceiveEvents("isFileExist", (_: any, __: any, channe
 
 function sendFileIsExist(webContentId: number, callbackId: string) {
   const webContent = webContents.fromId(webContentId);
+
   if (webContent && callbackId) {
     webContent.send(
       `RM_IPCFROM_MAIN${webContentId}`,
@@ -153,9 +189,38 @@ function sendFileIsExist(webContentId: number, callbackId: string) {
         eventName: "FileApi",
         peerId: webContentId,
       },
-      true
+      true,
     );
   }
+}
+
+function decodeQqMarketface(inputPath: string, outputPath: string): void {
+  const data = readFileSync(inputPath);
+
+  // Avoid applying the reversible XOR transform more than once.
+  if (isGif(data)) {
+    return;
+  }
+
+  for (let blockStart = 0; blockStart < data.length; blockStart += 50) {
+    const end = Math.min(blockStart + 20, data.length);
+
+    for (let index = blockStart; index < end; index++) {
+      data[index] ^= 0xff;
+    }
+  }
+
+  // Keep the existing static file when the decoded input is invalid.
+  if (!isGif(data)) {
+    return;
+  }
+
+  writeFileSync(outputPath, data);
+}
+
+function isGif(data: Buffer): boolean {
+  const header = data.subarray(0, 6).toString("ascii");
+  return header === "GIF87a" || header === "GIF89a";
 }
 
 export { convertMarketFaceToPic };
