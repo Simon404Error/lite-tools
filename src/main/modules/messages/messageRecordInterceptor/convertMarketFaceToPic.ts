@@ -1,10 +1,17 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { basename } from "node:path";
 import { webContents } from "electron";
 import { dispatchIpcEvent } from "@/main/utils/dispatchIpcEvent";
 import { configManager } from "@/main/modules/configManager";
 
-const faceFilePaths = new Set<string>();
-const awaitIsFileExist = new Map<string, Function>();
+const faceFilePaths = new Map<string, string>();
+const awaitIsFileExist = new Map<
+  string,
+  {
+    cb: () => void;
+    dynamicFacePath: string;
+  }
+>();
 
 function convertMarketFaceToPic(msgList: any[], webContentId: number) {
   for (const msgItem of msgList) {
@@ -25,12 +32,12 @@ function replaceMarketFace(marketFaceElement: any): object {
   const fileName = marketFaceElement.staticFacePath.split("\\").pop();
   const picWidth = marketFaceElement.imageHeight ?? 200;
   const picHeight = marketFaceElement.imageHeight ?? 200;
-  const sourcePath = marketFaceElement.staticFacePath;
-  faceFilePaths.add(sourcePath);
+  const staticFacePath = marketFaceElement.staticFacePath;
+  faceFilePaths.set(staticFacePath, marketFaceElement.dynamicFacePath);
   const thumbPath = new Map([
-    ["0", sourcePath],
-    ["198", sourcePath],
-    ["720", sourcePath],
+    ["0", staticFacePath],
+    ["198", staticFacePath],
+    ["720", staticFacePath],
   ]);
   return {
     picSubType: 1,
@@ -40,7 +47,7 @@ function replaceMarketFace(marketFaceElement: any): object {
     picHeight,
     original: true,
     md5HexStr: "",
-    sourcePath,
+    sourcePath: staticFacePath,
     thumbPath,
     transferStatus: 2,
     progress: 0,
@@ -106,7 +113,7 @@ function downloadMarketFace(marketFaceElement: any, webContentId: number) {
           undefined,
         ],
       },
-      true
+      true,
     );
   }
 }
@@ -117,15 +124,20 @@ IpcInterceptor.interceptIpcSendEvents(
     if (configManager.value.message.marketFaceToPicElement) {
       const filePath = args?.payload?.notifyInfo?.path;
       if (!filePath) return;
-      const cb = awaitIsFileExist.get(filePath);
-      if (cb) {
+      const item = awaitIsFileExist.get(filePath);
+      if (item) {
+        const { cb, dynamicFacePath } = item;
+        const noExtPath = filePath;
+        if (existsSync(filePath) && existsSync(dynamicFacePath)) {
+          decodeQqMarketface(dynamicFacePath, filePath);
+        }
         cb();
         awaitIsFileExist.delete(filePath);
       } else {
         faceFilePaths.delete(filePath);
       }
     }
-  }
+  },
 );
 
 IpcInterceptor.interceptIpcReceiveEvents("isFileExist", (_: any, __: any, channel: string, args: any) => {
@@ -134,8 +146,11 @@ IpcInterceptor.interceptIpcReceiveEvents("isFileExist", (_: any, __: any, channe
     const callbackId = args?.[0]?.callbackId;
     const filePath = args?.[1]?.payload?.[0];
     if (filePath && faceFilePaths.has(filePath)) {
+      awaitIsFileExist.set(filePath, {
+        cb: () => sendFileIsExist(webContentId, callbackId),
+        dynamicFacePath: faceFilePaths.get(filePath)!,
+      });
       faceFilePaths.delete(filePath);
-      awaitIsFileExist.set(filePath, () => sendFileIsExist(webContentId, callbackId));
       return { action: "block" };
     }
   }
@@ -153,9 +168,37 @@ function sendFileIsExist(webContentId: number, callbackId: string) {
         eventName: "FileApi",
         peerId: webContentId,
       },
-      true
+      true,
     );
   }
+}
+
+function decodeQqMarketface(inputPath: string, outputPath: string): void {
+  const data = readFileSync(inputPath);
+
+  // 避免多次 XOR。
+  if (isGif(data)) {
+    return;
+  }
+
+  for (let blockStart = 0; blockStart < data.length; blockStart += 50) {
+    const end = Math.min(blockStart + 20, data.length);
+    for (let index = blockStart; index < end; index++) {
+      data[index] ^= 0xff;
+    }
+  }
+
+  // 解码后格式错误，阻止覆盖文件
+  if (!isGif(data)) {
+    return;
+  }
+
+  writeFileSync(outputPath, data);
+}
+
+function isGif(data: Buffer): boolean {
+  const header = data.subarray(0, 6).toString("ascii");
+  return header === "GIF87a" || header === "GIF89a";
 }
 
 export { convertMarketFaceToPic };
