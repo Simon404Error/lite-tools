@@ -10,7 +10,7 @@ import { onComponentMount } from "@/renderer/modules/vueComponentTracker";
 import { waitForInstance } from "@/renderer/utils/domWaitFor";
 import { wallpaperManager } from "@/renderer/modules/wallpaperManager";
 import { setupLocalStickers } from "@/renderer/modules/localStickers";
-import { ckeditorManager } from "@/renderer/modules/ckeditorManager";
+import { proseMirrorManager } from "@/renderer/modules/proseMirrorManager";
 
 const log = createLogger("main");
 
@@ -29,7 +29,7 @@ async function setupMainPage() {
   setupGoBackMainList();
   setupLocalStickers();
   wallpaperManager.setup();
-  ckeditorManager.setup();
+  proseMirrorManager.setup();
   aioStore.onChange(() => {
     updateTopFuncBar();
     updateChatFuncBar();
