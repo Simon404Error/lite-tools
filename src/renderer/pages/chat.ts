@@ -7,7 +7,7 @@ import { setupHandleMessages } from "@/renderer/modules/handleMessages";
 import { waitForInstance } from "@/renderer/utils/domWaitFor";
 import { wallpaperManager } from "@/renderer/modules/wallpaperManager";
 import { setupLocalStickers } from "@/renderer/modules/localStickers";
-import { proseMirrorManager } from "@/renderer/modules/proseMirrorManager";
+import { editorManager } from "@/renderer/modules/editorManager";
 
 const log = createLogger("chat");
 
@@ -26,7 +26,7 @@ async function setupChatPage() {
   updateRecallConfig(configStore.value);
   updateInterface(configStore.value);
   wallpaperManager.setup();
-  proseMirrorManager.setup();
+  editorManager.setup();
   aioStore.onChange(() => {
     updateTopFuncBar();
     updateChatFuncBar();
