@@ -11,68 +11,61 @@ class ProseMirrorManager {
   private async replyCleanup() {
     const { editor } = await this.getProseMirrorInstance();
     const view = editor.view;
-    const originalDispatchTransaction = view.dispatchTransaction?.bind(view);
+
     let isCleaning = false;
-    let replyElement: any;
+    let lastReplyElement: any = null;
 
-    view.setProps({
-      dispatchTransaction: (transaction: any) => {
-        if (originalDispatchTransaction) {
-          originalDispatchTransaction(transaction);
-        } else {
-          view.updateState(view.state.apply(transaction));
-        }
+    const originalDispatch = view.dispatch.bind(view);
 
-        if (!transaction.docChanged) return;
+    view.dispatch = (tr: any) => {
+      originalDispatch(tr);
 
-        try {
-          const root = view.state.doc;
-          if (!configStore.value.message.removeReplyAt || isCleaning) return;
-          if (!root) return;
+      if (!tr.docChanged || isCleaning || !configStore.value.message.removeReplyAt) return;
 
-          let curReplyElement: any;
-          root.forEach((block: any) => {
-            if (!curReplyElement && block.type.name === "msgReply") {
-              curReplyElement = block;
-            }
-          });
+      try {
+        const root = view.state.doc;
+        let curReplyElement: any;
 
-          if (replyElement === curReplyElement) return;
-          replyElement = curReplyElement;
-          isCleaning = true;
+        root.forEach((block: any) => {
+          if (!curReplyElement && block.type.name === "msgReply") {
+            curReplyElement = block;
+          }
+        });
 
-          const targets: Array<{ atFrom: number; atTo: number; }> = [];
+        if (lastReplyElement === curReplyElement) return;
+        lastReplyElement = curReplyElement;
+        isCleaning = true;
 
-          root.descendants((block: any, blockPos: number) => {
-            if (block.type.name !== "paragraph") return;
+        const targets: Array<{ atFrom: number; atTo: number }> = [];
 
-            block.forEach((child: any, offset: number, index: number) => {
-              const next = index + 1 < block.childCount ? block.child(index + 1) : null;
-              if (child.type.name !== "msgAt" || !next) return;
-              targets.push({
-                atFrom: blockPos + 1 + offset,
-                atTo: blockPos + 1 + offset + child.nodeSize + 1, // + 1 for the blank space after the @ mention
-              });
+        root.descendants((block: any, blockPos: number) => {
+          if (block.type.name !== "paragraph") return;
+          block.forEach((child: any, offset: number, index: number) => {
+            const next = index + 1 < block.childCount ? block.child(index + 1) : null;
+            if (child.type.name !== "msgAt" || !next) return;
+            targets.push({
+              atFrom: blockPos + 1 + offset,
+              atTo: blockPos + 1 + offset + child.nodeSize + 1, // + 1 for the blank space after the @ mention
             });
           });
+        });
 
-          if (targets.length === 0) return;
+        if (targets.length === 0) return;
 
-          const transactionToApply = view.state.tr;
-          for (const target of targets.reverse()) {
-            transactionToApply.delete(target.atFrom, target.atTo);
-          }
-          if (transactionToApply.docChanged) {
-            view.dispatch(transactionToApply)
-          };
-        } catch (err) {
-          console.error("[replyCleanup]: Failed to remove @ mentions in reply:", err);
-          log("[replyCleanup]: Failed to remove @ mentions in reply:", err);
-        } finally {
-          isCleaning = false;
+        const cleanupTr = view.state.tr;
+        for (const t of targets.reverse()) {
+          cleanupTr.delete(t.atFrom, t.atTo);
         }
-      },
-    });
+
+        if (cleanupTr.docChanged) {
+          originalDispatch(cleanupTr);
+        }
+      } catch (e) {
+        console.error("[replyCleanup]: Failed to remove @ mentions in reply:", e);
+      } finally {
+        isCleaning = false;
+      }
+    }
   }
 
   private async getProseMirrorInstance() {
