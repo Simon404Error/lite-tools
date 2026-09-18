@@ -22,6 +22,11 @@
   }
 }
 
+// 屏蔽广告
+.tianshu-ad-banner {
+  display: none !important;
+}
+
 // 阻止撤回标记自定义颜色-暗色
 @media (prefers-color-scheme: dark) {
   :root {
